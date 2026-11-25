@@ -37,6 +37,7 @@ INSTALLED_APPS = [
     "rest_framework",
     "corsheaders",
     "channels",
+    "graphene_django",
     "core",
 ]
 
@@ -154,12 +155,21 @@ SOCIALACCOUNT_PROVIDERS = {
 
 LOGIN_REDIRECT_URL = "/api/auth/social/jwt/"
 
+GRAPHENE = {
+    "SCHEMA": "config.schema.schema",
+}
+
 ASGI_APPLICATION = "config.asgi.application"
 
 CHANNEL_LAYERS = {
-    "default": {
-        "BACKEND": "channels.layers.InMemoryChannelLayer",
-    },
+    "default": (
+        {
+            "BACKEND": "channels_redis.core.RedisChannelLayer",
+            "CONFIG": {"hosts": [os.getenv("REDIS_URL", "redis://127.0.0.1:6379")]},
+        }
+        if os.getenv("USE_REDIS_CHANNELS", "").lower() == "true"
+        else {"BACKEND": "channels.layers.InMemoryChannelLayer"}
+    ),
 }
 
 CORS_ALLOWED_ORIGINS = [

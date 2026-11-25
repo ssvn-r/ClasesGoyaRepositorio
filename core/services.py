@@ -1,4 +1,8 @@
 import requests
+import logging
+
+from asgiref.sync import async_to_sync
+from channels.layers import get_channel_layer
 from django.core.cache import cache
 from django.db.models import Count
 from django.utils import timezone
@@ -6,6 +10,9 @@ from rest_framework.exceptions import ValidationError
 
 from .models import Project, ProjectMembership, Task
 from .repositories import TaskRepository
+
+
+logger = logging.getLogger(__name__)
 
 
 class TaskService:
@@ -80,8 +87,9 @@ class ProjectService:
 class MembershipService:
     @staticmethod
     def is_member(user, project) -> bool:
+        project_id = getattr(project, "id", project)
         return ProjectMembership.objects.filter(
-            project=project,
+            project_id=project_id,
             user=user,
         ).exists()
 
@@ -98,3 +106,54 @@ class MembershipService:
         return Project.objects.filter(
             memberships__user=user,
         ).distinct().order_by("id")
+
+
+class NotificationService:
+    @staticmethod
+    def notify_task_created(task):
+        NotificationService._send(
+            task.project_id,
+            {
+                "event": "task_created",
+                "task_id": task.id,
+                "title": task.title,
+            },
+        )
+
+    @staticmethod
+    def notify_task_updated(task):
+        NotificationService._send(
+            task.project_id,
+            {
+                "event": "task_updated",
+                "task_id": task.id,
+                "title": task.title,
+            },
+        )
+
+    @staticmethod
+    def notify_task_completed(task):
+        NotificationService._send(
+            task.project_id,
+            {
+                "event": "task_completed",
+                "task_id": task.id,
+                "title": task.title,
+            },
+        )
+
+    @staticmethod
+    def _send(project_id, payload):
+        channel_layer = get_channel_layer()
+        try:
+            async_to_sync(channel_layer.group_send)(
+                f"project_{project_id}",
+                {
+                    "type": "task_notification",
+                    "payload": payload,
+                },
+            )
+        except Exception:
+            logger.exception(
+                "No se pudo enviar la notificación en tiempo real"
+            )

@@ -4,7 +4,7 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 import requests
-from asgiref.sync import async_to_sync
+from asgiref.sync import async_to_sync, sync_to_async
 from channels.testing import WebsocketCommunicator
 from django.contrib.auth import get_user_model
 from django.core.management import call_command
@@ -12,6 +12,7 @@ from django.core.cache import cache
 from django.test import TestCase
 from rest_framework.exceptions import ValidationError
 from rest_framework.test import APITestCase
+from rest_framework_simplejwt.tokens import RefreshToken
 from config.asgi import application
 
 from core.models import Project, ProjectMembership, SecurityLog, Tag, Task
@@ -727,15 +728,29 @@ class SecurityClass8Tests(APITestCase):
 class WebSocketClass9Tests(TestCase):
     async def test_existing_project_accepts_echo(self):
         project = await Project.objects.acreate(name="Proyecto WebSocket")
+        user = await get_user_model().objects.acreate_user(
+            username="socket-admin",
+            password="Socket-Seguro-2026!",
+        )
+        await ProjectMembership.objects.acreate(
+            project=project,
+            user=user,
+            role="admin",
+        )
+        access = await sync_to_async(
+            lambda: str(RefreshToken.for_user(user).access_token)
+        )()
         communicator = WebsocketCommunicator(
             application,
-            f"/ws/projects/{project.id}/",
+            f"/ws/projects/{project.id}/?token={access}",
         )
 
         connected, _ = await communicator.connect()
         self.assertTrue(connected)
 
         await communicator.send_json_to({"mensaje": "hola"})
+        presence = await communicator.receive_json_from()
+        self.assertEqual(presence["status"], "online")
         response = await communicator.receive_json_from()
         self.assertEqual(
             response,
@@ -752,4 +767,60 @@ class WebSocketClass9Tests(TestCase):
 
         connected, close_code = await communicator.connect()
         self.assertFalse(connected)
-        self.assertEqual(close_code, 4404)
+        self.assertEqual(close_code, 4401)
+
+
+class GraphQLClass11Tests(APITestCase):
+    def setUp(self):
+        self.user = get_user_model().objects.create_user(
+            username="graphql-admin",
+            password="GraphQL-Seguro-2026!",
+        )
+        self.project = Project.objects.create(name="Proyecto GraphQL")
+        ProjectMembership.objects.create(
+            project=self.project,
+            user=self.user,
+            role="admin",
+        )
+        refresh = RefreshToken.for_user(self.user)
+        self.client.credentials(
+            HTTP_AUTHORIZATION=f"Bearer {refresh.access_token}",
+        )
+
+    def test_graphql_query_returns_visible_project(self):
+        response = self.client.post(
+            "/graphql/",
+            {
+                "query": (
+                    "{ allProjects { id name tasks { id title } } }"
+                ),
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn("errors", response.json())
+        self.assertEqual(
+            response.json()["data"]["allProjects"][0]["name"],
+            "Proyecto GraphQL",
+        )
+
+    def test_graphql_create_task_uses_membership_permissions(self):
+        response = self.client.post(
+            "/graphql/",
+            {
+                "query": (
+                    "mutation { createTask(projectId: "
+                    f'"{self.project.id}", title: "Tarea GraphQL") '
+                    "{ ok task { id title } } }"
+                ),
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn("errors", response.json())
+        self.assertTrue(response.json()["data"]["createTask"]["ok"])
+        self.assertTrue(
+            Task.objects.filter(title="Tarea GraphQL").exists()
+        )
