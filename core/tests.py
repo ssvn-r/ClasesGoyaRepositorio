@@ -11,7 +11,7 @@ from django.test import TestCase
 from rest_framework.exceptions import ValidationError
 from rest_framework.test import APITestCase
 
-from core.models import Project, ProjectMembership, Tag, Task
+from core.models import Project, ProjectMembership, SecurityLog, Tag, Task
 from core.services import HolidayService, ProjectService, TaskService
 
 
@@ -638,3 +638,84 @@ class JWTAuthenticationTests(APITestCase):
         self.assertEqual(refresh.status_code, 200)
         self.assertIn("access", refresh.data)
         self.assertIn("refresh", refresh.data)
+
+
+class SecurityClass8Tests(APITestCase):
+    def setUp(self):
+        self.admin = get_user_model().objects.create_user(
+            username="admin",
+            password="Admin-Seguro-2026!",
+        )
+        self.member = get_user_model().objects.create_user(
+            username="member",
+            password="Miembro-Seguro-2026!",
+        )
+        self.project = Project.objects.create(name="Proyecto seguro")
+        ProjectMembership.objects.create(
+            project=self.project,
+            user=self.admin,
+            role="admin",
+        )
+        ProjectMembership.objects.create(
+            project=self.project,
+            user=self.member,
+            role="miembro",
+        )
+
+    def test_description_is_sanitized_before_storage(self):
+        self.client.force_authenticate(user=self.admin)
+        response = self.client.post(
+            "/api/tasks/",
+            {
+                "project": self.project.id,
+                "title": "Prueba XSS",
+                "description": '<script>alert("x")</script><b>Texto</b>',
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data["description"], "Texto")
+
+    def test_permission_denied_is_audited(self):
+        self.client.force_authenticate(user=self.member)
+        response = self.client.patch(
+            f"/api/projects/{self.project.id}/",
+            {"name": "Intento bloqueado"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertTrue(
+            SecurityLog.objects.filter(
+                user=self.member,
+                action="permission_denied",
+            ).exists()
+        )
+
+    def test_login_attempts_are_throttled(self):
+        cache.clear()
+        for _ in range(5):
+            response = self.client.post(
+                "/api/token/",
+                {"username": "nadie", "password": "incorrecta"},
+                format="json",
+            )
+        self.assertIn(response.status_code, (401, 429))
+
+        blocked = self.client.post(
+            "/api/token/",
+            {"username": "nadie", "password": "incorrecta"},
+            format="json",
+        )
+        self.assertEqual(blocked.status_code, 429)
+        self.assertIn("Retry-After", blocked.headers)
+
+    def test_security_headers_are_added(self):
+        response = self.client.get("/api/health/")
+
+        self.assertEqual(
+            response.headers["Content-Security-Policy"],
+            "default-src 'self'",
+        )
+        self.assertEqual(response.headers["X-Content-Type-Options"], "nosniff")

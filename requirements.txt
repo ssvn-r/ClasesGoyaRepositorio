@@ -5,13 +5,16 @@ charset-normalizer==3.5.3
 cryptography==50.0.2
 Django==5.2.19
 django-allauth==65.22.1
+django-cors-headers==4.9.0
 django-filter==26.2
 djangorestframework==3.18.3
 djangorestframework_simplejwt==5.5.1
 idna==3.20
+nh3==0.3.8
 oauthlib==4.0.1
 pycparser==3.12
 PyJWT==2.15.1
+pypdf==7.1.1
 python-dotenv==1.2.4
 requests==2.34.2
 sqlparse==0.6.1

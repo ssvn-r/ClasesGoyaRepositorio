@@ -15,7 +15,10 @@ if not SECRET_KEY or len(SECRET_KEY) < 32:
         "Configurá DJANGO_SECRET_KEY en .env con una clave aleatoria de al menos 32 caracteres."
     )
 DEBUG = True
-ALLOWED_HOSTS = ["localhost", "127.0.0.1"]
+ALLOWED_HOSTS = os.getenv(
+    "ALLOWED_HOSTS",
+    "127.0.0.1,localhost",
+).split(",")
 
 INSTALLED_APPS = [
     "django.contrib.admin",
@@ -31,10 +34,12 @@ INSTALLED_APPS = [
     "allauth.socialaccount.providers.google",
     "django_filters",
     "rest_framework",
+    "corsheaders",
     "core",
 ]
 
 MIDDLEWARE = [
+    "corsheaders.middleware.CorsMiddleware",
     "django.middleware.security.SecurityMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
@@ -42,6 +47,7 @@ MIDDLEWARE = [
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
+    "core.middleware.SecurityHeadersMiddleware",
     "allauth.account.middleware.AccountMiddleware",
 ]
 
@@ -110,6 +116,15 @@ REST_FRAMEWORK = {
     "DEFAULT_PERMISSION_CLASSES": [
         "rest_framework.permissions.IsAuthenticated",
     ],
+    "DEFAULT_THROTTLE_CLASSES": [
+        "rest_framework.throttling.AnonRateThrottle",
+        "rest_framework.throttling.UserRateThrottle",
+    ],
+    "DEFAULT_THROTTLE_RATES": {
+        "anon": "20/minute",
+        "user": "100/minute",
+        "login": "5/minute",
+    },
 }
 
 SIMPLE_JWT = {
@@ -136,3 +151,32 @@ SOCIALACCOUNT_PROVIDERS = {
 }
 
 LOGIN_REDIRECT_URL = "/api/auth/social/jwt/"
+
+CORS_ALLOWED_ORIGINS = [
+    "http://localhost:3000",
+    "https://taskflow-app.com",
+]
+
+SECURE_HSTS_SECONDS = 31536000
+SECURE_HSTS_INCLUDE_SUBDOMAINS = True
+SECURE_HSTS_PRELOAD = True
+SECURE_CONTENT_TYPE_NOSNIFF = True
+X_FRAME_OPTIONS = "DENY"
+SECURE_REFERRER_POLICY = "strict-origin-when-cross-origin"
+
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "handlers": {
+        "file": {
+            "class": "logging.FileHandler",
+            "filename": BASE_DIR / "security.log",
+        },
+    },
+    "loggers": {
+        "security": {
+            "handlers": ["file"],
+            "level": "WARNING",
+        },
+    },
+}

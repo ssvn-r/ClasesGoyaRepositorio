@@ -1,21 +1,27 @@
 from django.contrib.auth import get_user_model
 from django.db import transaction
 from django.http import JsonResponse
+import logging
 from rest_framework import viewsets
 from rest_framework.decorators import action
-from rest_framework.exceptions import PermissionDenied
+from rest_framework.exceptions import AuthenticationFailed, PermissionDenied
 from rest_framework.generics import CreateAPIView
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import RefreshToken
+from rest_framework_simplejwt.views import TokenObtainPairView
 
-from .models import Project, ProjectMembership, Task
+from .models import Project, ProjectMembership, SecurityLog, Task
 from .permissions import IsProjectAdminOrReadOnly
 from .repositories import TaskRepository
 from .serializers import ProjectSerializer, TaskSerializer
 from .serializers_auth import RegisterSerializer
 from .services import MembershipService, ProjectService, TaskService
+from .throttles import LoginRateThrottle
+
+
+security_logger = logging.getLogger("security")
 
 
 def health_check(request):
@@ -138,6 +144,28 @@ class RegisterView(CreateAPIView):
     serializer_class = RegisterSerializer
     permission_classes = [AllowAny]
     authentication_classes = []
+
+
+class ThrottledTokenObtainPairView(TokenObtainPairView):
+    throttle_classes = [LoginRateThrottle]
+
+    def post(self, request, *args, **kwargs):
+        try:
+            return super().post(request, *args, **kwargs)
+        except AuthenticationFailed:
+            ip = request.META.get("REMOTE_ADDR")
+            username = request.data.get("username", "")
+            SecurityLog.objects.create(
+                action="login_failed",
+                detail=f"usuario={username}",
+                ip_address=ip,
+            )
+            security_logger.warning(
+                "Login fallido para usuario %s desde %s",
+                username,
+                ip,
+            )
+            raise
 
 
 class SocialLoginJWTView(APIView):
