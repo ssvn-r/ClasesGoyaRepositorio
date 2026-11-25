@@ -64,9 +64,10 @@ class HolidayService:
 
 class ProjectService:
     @staticmethod
-    def project_summary(project: Project) -> dict[str, int]:
+    def project_summary(project: Project, owner) -> dict[str, int]:
         totals = dict(
-            project.tasks.values("status")
+            project.tasks.filter(owner=owner)
+            .values("status")
             .annotate(total=Count("id"))
             .values_list("status", "total")
         )

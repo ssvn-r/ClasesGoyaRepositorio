@@ -4,6 +4,7 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 import requests
+from django.contrib.auth import get_user_model
 from django.core.management import call_command
 from django.core.cache import cache
 from django.test import TestCase
@@ -75,6 +76,11 @@ class ImportTasksCommandTests(TestCase):
 
 class CrudApiTests(APITestCase):
     def setUp(self):
+        self.user = get_user_model().objects.create_user(
+            username="ana",
+            password="Clave-Segura-2026!",
+        )
+        self.client.force_authenticate(user=self.user)
         self.project = Project.objects.create(
             name="TaskFlow",
             description="Proyecto de prueba",
@@ -82,6 +88,7 @@ class CrudApiTests(APITestCase):
         self.tag = Tag.objects.create(name="backend")
         self.task = Task.objects.create(
             project=self.project,
+            owner=self.user,
             title="Crear API",
             priority="alta",
         )
@@ -133,6 +140,10 @@ class CrudApiTests(APITestCase):
 
         self.assertEqual(created.status_code, 201)
         task_id = created.data["id"]
+        self.assertEqual(
+            Task.objects.get(pk=task_id).owner,
+            self.user,
+        )
         self.assertEqual(
             self.client.get(f"/api/tasks/{task_id}/").status_code,
             200,
@@ -214,6 +225,7 @@ class CrudApiTests(APITestCase):
 
         Task.objects.create(
             project=self.project,
+            owner=self.user,
             title="Tarea completada",
             status="completada",
             due_date=date.today(),
@@ -296,11 +308,13 @@ class CrudApiTests(APITestCase):
         for index in range(6):
             Task.objects.create(
                 project=self.project,
+                owner=self.user,
                 title=f"Vencida {index}",
                 due_date=past_date,
             )
         Task.objects.create(
             project=self.project,
+            owner=self.user,
             title="Vencida completada",
             status="completada",
             due_date=past_date,
@@ -316,6 +330,7 @@ class CrudApiTests(APITestCase):
         for index in range(5):
             Task.objects.create(
                 project=self.project,
+                owner=self.user,
                 title=f"Reporte {index}",
                 priority="media",
             )
@@ -332,12 +347,14 @@ class CrudApiTests(APITestCase):
 
         Task.objects.create(
             project=self.project,
+            owner=self.user,
             title="Terminada",
             status="completada",
             due_date=date.today(),
         )
         Task.objects.create(
             project=self.project,
+            owner=self.user,
             title="En progreso",
             status="en_progreso",
         )
@@ -348,6 +365,61 @@ class CrudApiTests(APITestCase):
             summary.data,
             {"pendiente": 6, "en_progreso": 1, "completada": 1},
         )
+
+    def test_owner_filter_hides_foreign_tasks_and_prevents_project_deletion(self):
+        other_user = get_user_model().objects.create_user(
+            username="bruno",
+            password="Otra-Clave-Segura-2026!",
+        )
+        foreign_task = Task.objects.create(
+            project=self.project,
+            owner=other_user,
+            title="Tarea privada",
+        )
+
+        self.assertEqual(
+            self.client.get(f"/api/tasks/{foreign_task.id}/").status_code,
+            404,
+        )
+        project = self.client.get(f"/api/projects/{self.project.id}/")
+        self.assertEqual(
+            [task["title"] for task in project.data["tasks"]],
+            ["Crear API"],
+        )
+        summary = self.client.get(
+            f"/api/projects/{self.project.id}/summary/"
+        )
+        self.assertEqual(summary.data["pendiente"], 1)
+        self.assertEqual(
+            self.client.delete(f"/api/projects/{self.project.id}/").status_code,
+            403,
+        )
+        self.assertTrue(Task.objects.filter(pk=foreign_task.pk).exists())
+
+    def test_foreign_completion_does_not_authorize_task_progress(self):
+        other_user = get_user_model().objects.create_user(
+            username="bruno",
+            password="Otra-Clave-Segura-2026!",
+        )
+        Task.objects.create(
+            project=self.project,
+            owner=other_user,
+            title="Tarea completada ajena",
+            status="completada",
+            due_date=date.today(),
+        )
+
+        response = self.client.post(
+            "/api/tasks/",
+            {
+                "project": self.project.id,
+                "title": "Iniciar tarea",
+                "status": "en_progreso",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 400)
 
 
 class TaskServiceTests(TestCase):
@@ -395,15 +467,21 @@ class TaskServiceTests(TestCase):
         )
 
     def test_project_summary_counts_each_status(self):
-        Task.objects.create(project=self.project, title="Pendiente")
+        user = get_user_model().objects.create_user(username="service-user")
         Task.objects.create(
             project=self.project,
+            owner=user,
+            title="Pendiente",
+        )
+        Task.objects.create(
+            project=self.project,
+            owner=user,
             title="En progreso",
             status="en_progreso",
         )
 
         self.assertEqual(
-            ProjectService.project_summary(self.project),
+            ProjectService.project_summary(self.project, user),
             {"pendiente": 1, "en_progreso": 1, "completada": 0},
         )
 
@@ -437,3 +515,67 @@ class HolidayServiceTests(TestCase):
         mock_get.return_value.json.return_value = {"unexpected": "shape"}
 
         self.assertEqual(HolidayService.get_holidays(2026), [])
+
+
+class JWTAuthenticationTests(APITestCase):
+    def test_api_requires_authentication(self):
+        response = self.client.get("/api/tasks/")
+
+        self.assertEqual(response.status_code, 401)
+        self.assertTrue(response.headers["WWW-Authenticate"].startswith("Bearer"))
+
+    def test_register_login_refresh_and_access_owned_tasks(self):
+        registration = self.client.post(
+            "/api/register/",
+            {
+                "username": "carla",
+                "email": "carla@example.com",
+                "password": "N3v3rShare-this-Long-Passphrase!",
+            },
+            format="json",
+        )
+        self.assertEqual(registration.status_code, 201)
+        self.assertNotIn("password", registration.data)
+
+        user = get_user_model().objects.get(username="carla")
+        self.assertTrue(
+            user.check_password("N3v3rShare-this-Long-Passphrase!")
+        )
+        project = Project.objects.create(name="Proyecto de Carla")
+        Task.objects.create(
+            project=project,
+            owner=user,
+            title="Tarea privada de Carla",
+        )
+
+        login = self.client.post(
+            "/api/token/",
+            {
+                "username": "carla",
+                "password": "N3v3rShare-this-Long-Passphrase!",
+            },
+            format="json",
+        )
+        self.assertEqual(login.status_code, 200)
+        self.assertIn("access", login.data)
+        self.assertIn("refresh", login.data)
+
+        self.client.credentials(
+            HTTP_AUTHORIZATION=f"Bearer {login.data['access']}"
+        )
+        tasks = self.client.get("/api/tasks/")
+        self.assertEqual(tasks.status_code, 200)
+        self.assertEqual(tasks.data["count"], 1)
+        self.assertEqual(
+            tasks.data["results"][0]["title"],
+            "Tarea privada de Carla",
+        )
+
+        refresh = self.client.post(
+            "/api/token/refresh/",
+            {"refresh": login.data["refresh"]},
+            format="json",
+        )
+        self.assertEqual(refresh.status_code, 200)
+        self.assertIn("access", refresh.data)
+        self.assertIn("refresh", refresh.data)

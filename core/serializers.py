@@ -64,6 +64,9 @@ class TaskSerializer(serializers.ModelSerializer):
                 project=project,
                 status="completada",
             )
+            request = self.context.get("request")
+            if request and request.user.is_authenticated:
+                completed_tasks = completed_tasks.filter(owner=request.user)
             if self.instance:
                 completed_tasks = completed_tasks.exclude(pk=self.instance.pk)
             if not completed_tasks.exists():
@@ -75,8 +78,18 @@ class TaskSerializer(serializers.ModelSerializer):
 
 
 class ProjectSerializer(serializers.ModelSerializer):
-    tasks = TaskSerializer(many=True, read_only=True)
+    tasks = serializers.SerializerMethodField()
 
     class Meta:
         model = Project
         fields = ["id", "name", "description", "tasks", "created_at"]
+
+    def get_tasks(self, obj):
+        tasks = getattr(obj, "owned_tasks", None)
+        if tasks is None:
+            request = self.context.get("request")
+            if request is None or not request.user.is_authenticated:
+                tasks = obj.tasks.none()
+            else:
+                tasks = obj.tasks.filter(owner=request.user)
+        return TaskSerializer(tasks, many=True, context=self.context).data
