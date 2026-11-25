@@ -1,3 +1,4 @@
+from datetime import date, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -68,7 +69,7 @@ class ImportTasksCommandTests(TestCase):
         )
 
 
-class ReadOnlyApiTests(APITestCase):
+class CrudApiTests(APITestCase):
     def setUp(self):
         self.project = Project.objects.create(
             name="TaskFlow",
@@ -90,25 +91,159 @@ class ReadOnlyApiTests(APITestCase):
         self.assertEqual(response.data[0]["tasks"][0]["title"], "Crear API")
         self.assertEqual(response.data[0]["tasks"][0]["tags"][0]["name"], "backend")
 
-    def test_task_list_is_read_only(self):
+    def test_task_list_returns_project_and_tags(self):
         response = self.client.get("/api/tasks/")
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data[0]["project"], self.project.id)
         self.assertEqual(response.data[0]["tags"][0]["name"], "backend")
-        self.assertEqual(
-            self.client.post("/api/tasks/", {"title": "No permitido"}).status_code,
-            405,
+
+    def test_task_crud_returns_expected_http_statuses(self):
+        created = self.client.post(
+            "/api/tasks/",
+            {
+                "project": self.project.id,
+                "title": "Nueva tarea",
+                "priority": "media",
+                "status": "pendiente",
+            },
+            format="json",
         )
 
-    def test_project_detail_returns_project_or_404(self):
-        response = self.client.get(f"/api/projects/{self.project.id}/")
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data["name"], "TaskFlow")
+        self.assertEqual(created.status_code, 201)
+        task_id = created.data["id"]
         self.assertEqual(
-            self.client.get("/api/projects/999/").status_code,
+            self.client.get(f"/api/tasks/{task_id}/").status_code,
+            200,
+        )
+        updated = self.client.patch(
+            f"/api/tasks/{task_id}/",
+            {"title": "Tarea actualizada"},
+            format="json",
+        )
+        self.assertEqual(updated.status_code, 200)
+        self.assertEqual(updated.data["title"], "Tarea actualizada")
+        replaced = self.client.put(
+            f"/api/tasks/{task_id}/",
+            {
+                "project": self.project.id,
+                "title": "Tarea reemplazada",
+                "description": "Reemplazo completo",
+                "priority": "alta",
+                "status": "pendiente",
+                "due_date": None,
+            },
+            format="json",
+        )
+        self.assertEqual(replaced.status_code, 200)
+        self.assertEqual(replaced.data["title"], "Tarea reemplazada")
+        self.assertEqual(
+            self.client.delete(f"/api/tasks/{task_id}/").status_code,
+            204,
+        )
+        self.assertEqual(
+            self.client.get(f"/api/tasks/{task_id}/").status_code,
             404,
+        )
+
+    def test_invalid_input_returns_400_with_error_envelope(self):
+        response = self.client.post(
+            "/api/tasks/",
+            {"project": self.project.id},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertTrue(response.data["error"])
+        self.assertIn("title", response.data["detail"])
+
+    def test_business_validations_reject_invalid_tasks(self):
+        past_date = (date.today() - timedelta(days=1)).isoformat()
+        past_deadline = self.client.post(
+            "/api/tasks/",
+            {
+                "project": self.project.id,
+                "title": "Fecha vencida",
+                "due_date": past_date,
+            },
+            format="json",
+        )
+        completed_without_date = self.client.post(
+            "/api/tasks/",
+            {
+                "project": self.project.id,
+                "title": "Sin fecha",
+                "status": "completada",
+            },
+            format="json",
+        )
+        in_progress_without_completed = self.client.post(
+            "/api/tasks/",
+            {
+                "project": self.project.id,
+                "title": "En progreso prematuro",
+                "status": "en_progreso",
+            },
+            format="json",
+        )
+
+        self.assertEqual(past_deadline.status_code, 400)
+        self.assertEqual(completed_without_date.status_code, 400)
+        self.assertEqual(in_progress_without_completed.status_code, 400)
+
+        Task.objects.create(
+            project=self.project,
+            title="Tarea completada",
+            status="completada",
+            due_date=date.today(),
+        )
+        allowed_in_progress = self.client.post(
+            "/api/tasks/",
+            {
+                "project": self.project.id,
+                "title": "En progreso permitido",
+                "status": "en_progreso",
+            },
+            format="json",
+        )
+        self.assertEqual(allowed_in_progress.status_code, 201)
+
+    def test_project_viewset_supports_create_update_and_delete(self):
+        created = self.client.post(
+            "/api/projects/",
+            {"name": "Proyecto nuevo", "description": "Prueba CRUD"},
+            format="json",
+        )
+        self.assertEqual(created.status_code, 201)
+        project_id = created.data["id"]
+        self.assertEqual(
+            self.client.get(f"/api/projects/{project_id}/").status_code,
+            200,
+        )
+
+        updated = self.client.put(
+            f"/api/projects/{project_id}/",
+            {"name": "Proyecto actualizado", "description": ""},
+            format="json",
+        )
+        self.assertEqual(updated.status_code, 200)
+        self.assertEqual(updated.data["name"], "Proyecto actualizado")
+        self.assertEqual(
+            self.client.delete(f"/api/projects/{project_id}/").status_code,
+            204,
+        )
+
+    def test_unknown_api_exception_returns_consistent_500(self):
+        with patch(
+            "core.views.ProjectViewSet.list",
+            side_effect=RuntimeError("error simulado"),
+        ):
+            response = self.client.get("/api/projects/")
+
+        self.assertEqual(response.status_code, 500)
+        self.assertEqual(
+            response.data,
+            {"error": True, "detail": "Error interno del servidor."},
         )
 
     def test_health_check_remains_available(self):

@@ -1,0 +1,27 @@
+Respuestas registradas al probar la API local el 2026-11-25.
+
+GET /api/tasks/6/
+HTTP 200
+{"id":6,"project":3,"title":"Tarea HTTP temporal","description":"","priority":"media","status":"pendiente","due_date":null,"tags":[],"created_at":"2026-11-25T14:16:56.265025-03:00"}
+
+POST /api/tasks/
+Payload: {"project":3,"title":"Tarea HTTP temporal","priority":"media","status":"pendiente"}
+HTTP 201
+{"id":6,"project":3,"title":"Tarea HTTP temporal","description":"","priority":"media","status":"pendiente","due_date":null,"tags":[],"created_at":"2026-11-25T14:16:56.265025-03:00"}
+
+DELETE /api/tasks/6/
+HTTP 204
+Body vacio.
+
+POST /api/tasks/
+Payload: {"project":3}
+HTTP 400
+{"error":true,"detail":{"title":["Este campo es requerido."]}}
+
+GET /api/tasks/999999/
+HTTP 404
+{"error":true,"detail":{"detail":"No Task matches the given query."}}
+
+GET /api/projects/ con una excepcion interna simulada en la vista (APIClient)
+HTTP 500
+{"error":true,"detail":"Error interno del servidor."}
