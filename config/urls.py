@@ -2,7 +2,7 @@ from django.contrib import admin
 from django.urls import include, path
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 
-from core.views import RegisterView
+from core.views import RegisterView, SocialLoginJWTView
 
 
 urlpatterns = [
@@ -10,6 +10,8 @@ urlpatterns = [
     path("api/token/", TokenObtainPairView.as_view(), name="token_obtain_pair"),
     path("api/token/refresh/", TokenRefreshView.as_view(), name="token_refresh"),
     path("api/register/", RegisterView.as_view(), name="register"),
+    path("accounts/", include("allauth.urls")),
+    path("api/auth/social/jwt/", SocialLoginJWTView.as_view(), name="social_jwt"),
     path("api-auth/", include("rest_framework.urls")),
     path("api/", include("core.urls")),
 ]

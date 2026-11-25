@@ -4,7 +4,7 @@ from django.db.models import Count
 from django.utils import timezone
 from rest_framework.exceptions import ValidationError
 
-from .models import Project, Task
+from .models import Project, ProjectMembership, Task
 from .repositories import TaskRepository
 
 
@@ -64,9 +64,9 @@ class HolidayService:
 
 class ProjectService:
     @staticmethod
-    def project_summary(project: Project, owner) -> dict[str, int]:
+    def project_summary(project: Project, owner=None) -> dict[str, int]:
         totals = dict(
-            project.tasks.filter(owner=owner)
+            project.tasks.all()
             .values("status")
             .annotate(total=Count("id"))
             .values_list("status", "total")
@@ -75,3 +75,26 @@ class ProjectService:
             status: totals.get(status, 0)
             for status, _ in Task.STATUS_CHOICES
         }
+
+
+class MembershipService:
+    @staticmethod
+    def is_member(user, project) -> bool:
+        return ProjectMembership.objects.filter(
+            project=project,
+            user=user,
+        ).exists()
+
+    @staticmethod
+    def is_admin(user, project) -> bool:
+        return ProjectMembership.objects.filter(
+            project=project,
+            user=user,
+            role="admin",
+        ).exists()
+
+    @staticmethod
+    def projects_for(user):
+        return Project.objects.filter(
+            memberships__user=user,
+        ).distinct().order_by("id")

@@ -11,7 +11,7 @@ from django.test import TestCase
 from rest_framework.exceptions import ValidationError
 from rest_framework.test import APITestCase
 
-from core.models import Project, Tag, Task
+from core.models import Project, ProjectMembership, Tag, Task
 from core.services import HolidayService, ProjectService, TaskService
 
 
@@ -84,6 +84,11 @@ class CrudApiTests(APITestCase):
         self.project = Project.objects.create(
             name="TaskFlow",
             description="Proyecto de prueba",
+        )
+        ProjectMembership.objects.create(
+            project=self.project,
+            user=self.user,
+            role="admin",
         )
         self.tag = Tag.objects.create(name="backend")
         self.task = Task.objects.create(
@@ -366,35 +371,84 @@ class CrudApiTests(APITestCase):
             {"pendiente": 6, "en_progreso": 1, "completada": 1},
         )
 
-    def test_owner_filter_hides_foreign_tasks_and_prevents_project_deletion(self):
+    def test_project_members_can_view_shared_tasks(self):
         other_user = get_user_model().objects.create_user(
             username="bruno",
             password="Otra-Clave-Segura-2026!",
         )
+        ProjectMembership.objects.create(
+            project=self.project,
+            user=other_user,
+            role="miembro",
+        )
         foreign_task = Task.objects.create(
             project=self.project,
             owner=other_user,
-            title="Tarea privada",
+            title="Tarea compartida",
         )
 
         self.assertEqual(
             self.client.get(f"/api/tasks/{foreign_task.id}/").status_code,
-            404,
+            200,
         )
         project = self.client.get(f"/api/projects/{self.project.id}/")
         self.assertEqual(
-            [task["title"] for task in project.data["tasks"]],
-            ["Crear API"],
+            {task["title"] for task in project.data["tasks"]},
+            {"Crear API", "Tarea compartida"},
         )
         summary = self.client.get(
             f"/api/projects/{self.project.id}/summary/"
         )
-        self.assertEqual(summary.data["pendiente"], 1)
+        self.assertEqual(summary.data["pendiente"], 2)
+
+    def test_member_cannot_modify_project_or_add_members(self):
+        member = get_user_model().objects.create_user(
+            username="bruno",
+            password="Otra-Clave-Segura-2026!",
+        )
+        ProjectMembership.objects.create(
+            project=self.project,
+            user=member,
+            role="miembro",
+        )
+        self.client.force_authenticate(user=member)
+
         self.assertEqual(
-            self.client.delete(f"/api/projects/{self.project.id}/").status_code,
+            self.client.patch(
+                f"/api/projects/{self.project.id}/",
+                {"name": "No permitido"},
+                format="json",
+            ).status_code,
             403,
         )
-        self.assertTrue(Task.objects.filter(pk=foreign_task.pk).exists())
+        self.assertEqual(
+            self.client.post(
+                f"/api/projects/{self.project.id}/add_member/",
+                {"username": "otro", "role": "miembro"},
+                format="json",
+            ).status_code,
+            403,
+        )
+
+    def test_admin_can_add_member_and_member_is_visible(self):
+        new_member = get_user_model().objects.create_user(
+            username="bruno",
+            password="Otra-Clave-Segura-2026!",
+        )
+
+        response = self.client.post(
+            f"/api/projects/{self.project.id}/add_member/",
+            {"username": "bruno", "role": "miembro"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 201)
+        self.assertTrue(
+            ProjectMembership.objects.filter(
+                project=self.project,
+                user=new_member,
+                role="miembro",
+            ).exists()
+        )
 
     def test_foreign_completion_does_not_authorize_task_progress(self):
         other_user = get_user_model().objects.create_user(
@@ -542,6 +596,11 @@ class JWTAuthenticationTests(APITestCase):
             user.check_password("N3v3rShare-this-Long-Passphrase!")
         )
         project = Project.objects.create(name="Proyecto de Carla")
+        ProjectMembership.objects.create(
+            project=project,
+            user=user,
+            role="admin",
+        )
         Task.objects.create(
             project=project,
             owner=user,

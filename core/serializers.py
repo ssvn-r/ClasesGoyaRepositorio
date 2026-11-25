@@ -85,11 +85,5 @@ class ProjectSerializer(serializers.ModelSerializer):
         fields = ["id", "name", "description", "tasks", "created_at"]
 
     def get_tasks(self, obj):
-        tasks = getattr(obj, "owned_tasks", None)
-        if tasks is None:
-            request = self.context.get("request")
-            if request is None or not request.user.is_authenticated:
-                tasks = obj.tasks.none()
-            else:
-                tasks = obj.tasks.filter(owner=request.user)
+        tasks = obj.tasks.all()
         return TaskSerializer(tasks, many=True, context=self.context).data
