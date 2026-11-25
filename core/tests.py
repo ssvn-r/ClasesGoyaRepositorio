@@ -4,12 +4,15 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 import requests
+from asgiref.sync import async_to_sync
+from channels.testing import WebsocketCommunicator
 from django.contrib.auth import get_user_model
 from django.core.management import call_command
 from django.core.cache import cache
 from django.test import TestCase
 from rest_framework.exceptions import ValidationError
 from rest_framework.test import APITestCase
+from config.asgi import application
 
 from core.models import Project, ProjectMembership, SecurityLog, Tag, Task
 from core.services import HolidayService, ProjectService, TaskService
@@ -719,3 +722,34 @@ class SecurityClass8Tests(APITestCase):
             "default-src 'self'",
         )
         self.assertEqual(response.headers["X-Content-Type-Options"], "nosniff")
+
+
+class WebSocketClass9Tests(TestCase):
+    async def test_existing_project_accepts_echo(self):
+        project = await Project.objects.acreate(name="Proyecto WebSocket")
+        communicator = WebsocketCommunicator(
+            application,
+            f"/ws/projects/{project.id}/",
+        )
+
+        connected, _ = await communicator.connect()
+        self.assertTrue(connected)
+
+        await communicator.send_json_to({"mensaje": "hola"})
+        response = await communicator.receive_json_from()
+        self.assertEqual(
+            response,
+            {"echo": {"mensaje": "hola"}},
+        )
+
+        await communicator.disconnect()
+
+    async def test_unknown_project_is_rejected(self):
+        communicator = WebsocketCommunicator(
+            application,
+            "/ws/projects/999999/",
+        )
+
+        connected, close_code = await communicator.connect()
+        self.assertFalse(connected)
+        self.assertEqual(close_code, 4404)
