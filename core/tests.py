@@ -3,11 +3,15 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
+import requests
 from django.core.management import call_command
+from django.core.cache import cache
 from django.test import TestCase
+from rest_framework.exceptions import ValidationError
 from rest_framework.test import APITestCase
 
 from core.models import Project, Tag, Task
+from core.services import HolidayService, ProjectService, TaskService
 
 
 class ImportTasksCommandTests(TestCase):
@@ -87,16 +91,33 @@ class CrudApiTests(APITestCase):
         response = self.client.get("/api/projects/")
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data[0]["name"], "TaskFlow")
-        self.assertEqual(response.data[0]["tasks"][0]["title"], "Crear API")
-        self.assertEqual(response.data[0]["tasks"][0]["tags"][0]["name"], "backend")
+        project = response.data["results"][0]
+        self.assertEqual(project["name"], "TaskFlow")
+        self.assertEqual(project["tasks"][0]["title"], "Crear API")
+        self.assertEqual(project["tasks"][0]["tags"][0]["name"], "backend")
 
     def test_task_list_returns_project_and_tags(self):
         response = self.client.get("/api/tasks/")
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data[0]["project"], self.project.id)
-        self.assertEqual(response.data[0]["tags"][0]["name"], "backend")
+        task = response.data["results"][0]
+        self.assertEqual(task["project"], self.project.id)
+        self.assertEqual(task["tags"][0]["name"], "backend")
+
+    def test_task_serializer_includes_holiday_flag(self):
+        holiday = date(2026, 5, 25)
+        self.task.due_date = holiday
+        self.task.save(update_fields=["due_date"])
+
+        with patch(
+            "core.serializers.HolidayService.is_holiday",
+            return_value=True,
+        ) as is_holiday:
+            response = self.client.get(f"/api/tasks/{self.task.id}/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.data["due_on_holiday"])
+        is_holiday.assert_called_once_with(holiday)
 
     def test_task_crud_returns_expected_http_statuses(self):
         created = self.client.post(
@@ -251,3 +272,168 @@ class CrudApiTests(APITestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json(), {"status": "ok", "service": "TaskFlow API"})
+
+    def test_task_actions_complete_and_list_overdue(self):
+        complete_without_deadline = self.client.post(
+            f"/api/tasks/{self.task.id}/complete/",
+            {},
+            format="json",
+        )
+        self.assertEqual(complete_without_deadline.status_code, 400)
+
+        self.task.due_date = date.today()
+        self.task.save(update_fields=["due_date"])
+        with patch("core.serializers.HolidayService.is_holiday", return_value=False):
+            completed = self.client.post(
+                f"/api/tasks/{self.task.id}/complete/",
+                {},
+                format="json",
+            )
+        self.assertEqual(completed.status_code, 200)
+        self.assertEqual(completed.data["status"], "completada")
+
+        past_date = date.today() - timedelta(days=1)
+        for index in range(6):
+            Task.objects.create(
+                project=self.project,
+                title=f"Vencida {index}",
+                due_date=past_date,
+            )
+        Task.objects.create(
+            project=self.project,
+            title="Vencida completada",
+            status="completada",
+            due_date=past_date,
+        )
+        with patch("core.serializers.HolidayService.is_holiday", return_value=False):
+            overdue = self.client.get("/api/tasks/overdue/")
+
+        self.assertEqual(overdue.status_code, 200)
+        self.assertEqual(overdue.data["count"], 6)
+        self.assertEqual(len(overdue.data["results"]), 5)
+
+    def test_pagination_filters_search_and_project_summary(self):
+        for index in range(5):
+            Task.objects.create(
+                project=self.project,
+                title=f"Reporte {index}",
+                priority="media",
+            )
+
+        second_page = self.client.get("/api/tasks/?page=2")
+        filtered = self.client.get("/api/tasks/?status=pendiente&priority=alta")
+        searched = self.client.get("/api/tasks/?search=Reporte")
+
+        self.assertEqual(second_page.status_code, 200)
+        self.assertEqual(second_page.data["count"], 6)
+        self.assertEqual(len(second_page.data["results"]), 1)
+        self.assertEqual(filtered.data["count"], 1)
+        self.assertEqual(searched.data["count"], 5)
+
+        Task.objects.create(
+            project=self.project,
+            title="Terminada",
+            status="completada",
+            due_date=date.today(),
+        )
+        Task.objects.create(
+            project=self.project,
+            title="En progreso",
+            status="en_progreso",
+        )
+        summary = self.client.get(f"/api/projects/{self.project.id}/summary/")
+
+        self.assertEqual(summary.status_code, 200)
+        self.assertEqual(
+            summary.data,
+            {"pendiente": 6, "en_progreso": 1, "completada": 1},
+        )
+
+
+class TaskServiceTests(TestCase):
+    def setUp(self):
+        self.project = Project.objects.create(name="Servicios")
+
+    def test_mark_completed_enforces_deadline_and_updates_task(self):
+        task = Task.objects.create(project=self.project, title="Sin fecha")
+        with self.assertRaises(ValidationError):
+            TaskService.mark_completed(task)
+
+        task.due_date = date.today()
+        task.save(update_fields=["due_date"])
+        completed = TaskService.mark_completed(task)
+
+        self.assertEqual(completed.status, "completada")
+        self.assertEqual(
+            Task.objects.get(pk=task.pk).status,
+            "completada",
+        )
+
+    def test_tasks_overdue_excludes_completed_and_future_tasks(self):
+        yesterday = date.today() - timedelta(days=1)
+        tomorrow = date.today() + timedelta(days=1)
+        overdue = Task.objects.create(
+            project=self.project,
+            title="Vencida",
+            due_date=yesterday,
+        )
+        Task.objects.create(
+            project=self.project,
+            title="Vencida y completada",
+            status="completada",
+            due_date=yesterday,
+        )
+        Task.objects.create(
+            project=self.project,
+            title="A futuro",
+            due_date=tomorrow,
+        )
+
+        self.assertEqual(
+            list(TaskService.tasks_overdue().values_list("pk", flat=True)),
+            [overdue.pk],
+        )
+
+    def test_project_summary_counts_each_status(self):
+        Task.objects.create(project=self.project, title="Pendiente")
+        Task.objects.create(
+            project=self.project,
+            title="En progreso",
+            status="en_progreso",
+        )
+
+        self.assertEqual(
+            ProjectService.project_summary(self.project),
+            {"pendiente": 1, "en_progreso": 1, "completada": 0},
+        )
+
+
+class HolidayServiceTests(TestCase):
+    def setUp(self):
+        cache.clear()
+
+    @patch("core.services.requests.get")
+    def test_holiday_results_are_cached_by_year(self, mock_get):
+        response = mock_get.return_value
+        response.json.return_value = [{"date": "2026-05-25"}]
+
+        self.assertTrue(HolidayService.is_holiday(date(2026, 5, 25)))
+        self.assertFalse(HolidayService.is_holiday(date(2026, 5, 26)))
+
+        mock_get.assert_called_once_with(
+            "https://date.nager.at/api/v3/PublicHolidays/2026/AR",
+            timeout=5,
+        )
+
+    @patch("core.services.requests.get", side_effect=requests.Timeout)
+    def test_external_failure_is_cached_as_empty_list(self, mock_get):
+        self.assertEqual(HolidayService.get_holidays(2026), [])
+        self.assertEqual(HolidayService.get_holidays(2026), [])
+
+        mock_get.assert_called_once()
+
+    @patch("core.services.requests.get")
+    def test_invalid_external_response_degrades_to_no_holidays(self, mock_get):
+        mock_get.return_value.json.return_value = {"unexpected": "shape"}
+
+        self.assertEqual(HolidayService.get_holidays(2026), [])
